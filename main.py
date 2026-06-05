@@ -1,193 +1,130 @@
-from fastapi import FastAPI, HTTPException 
-from fastapi.middleware.cors import CORSMiddleware 
-from pydantic import BaseModel 
-from typing import Optional 
-import mysql.connector 
-import os 
-from dotenv import load_dotenv 
+import os
+import uvicorn
+from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from dotenv import load_dotenv
+import mysql.connector
 
-load_dotenv() 
+load_dotenv()
 
-app = FastAPI(title="Kas RW API") 
+app = FastAPI(title="Sistem API Kas RW Sukapura")
 
-app.add_middleware( 
-    CORSMiddleware, 
-    allow_origins=["*"], 
-    allow_methods=["*"], 
-    allow_headers=["*"], 
-) 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def get_db(): 
-    return mysql.connector.connect( 
-        host="192.168.56.11",               
-        port=3306, 
-        database="kasrw",       
-        user="kasrw",                      
-        password="@password123",                 
-    ) 
+class TransaksiSchema(BaseModel):
+    jenis: str
+    tanggal: str
+    keterangan: str
+    jumlah: float
 
-# Mengubah tipe tanggal menjadi str agar aman saat menerima kiriman dari HTML/JS
-class TransaksiBase(BaseModel): 
-    tanggal: str 
-    keterangan: str 
-    jenis: str      # 'pemasukan' atau 'pengeluaran' 
-    jumlah: float 
 
-class TransaksiUpdate(BaseModel): 
-    tanggal: Optional[str] = None 
-    keterangan: Optional[str] = None 
-    jenis: Optional[str] = None 
-    jumlah: Optional[float] = None 
+def get_db_connection():
+    try:
+        conn = mysql.connector.connect(
+            host=os.getenv("DB_HOST", "localhost"),
+            port=int(os.getenv("DB_PORT", 3306)),
+            user=os.getenv("DB_USER", "root"),
+            password=os.getenv("DB_PASSWORD", ""),
+            database=os.getenv("DB_NAME", "kasrw"),
+        )
+        return conn
+    except mysql.connector.Error as err:
+        print("MYSQL ERROR:", err)
+        raise HTTPException(status_code=500, detail=f"DB Error: {err}")
 
-@app.get("/") 
-def root(): 
-    return {"message": "Kas RW API berjalan"} 
 
-@app.get("/transaksi") 
-def get_all(): 
-    db = get_db() 
-    cursor = db.cursor(dictionary=True) 
+@app.get("/saldo")
+async def get_ringkasan_saldo():
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT SUM(jumlah) AS total FROM transaksi WHERE jenis='pemasukan'")
+        pemasukan = cursor.fetchone()["total"] or 0
 
-    cursor.execute( 
-        "SELECT * FROM transaksi ORDER BY tanggal DESC" 
-    ) 
+        cursor.execute("SELECT SUM(jumlah) AS total FROM transaksi WHERE jenis='pengeluaran'")
+        pengeluaran = cursor.fetchone()["total"] or 0
 
-    rows = cursor.fetchall() 
-    db.close() 
+        cursor.execute("SELECT COUNT(*) AS total FROM transaksi")
+        jumlah_transaksi = cursor.fetchone()["total"] or 0
 
-    # Mengubah objek date MySQL menjadi string biasa agar tidak error JSON
-    for row in rows:
-        if row.get("tanggal"):
-            row["tanggal"] = str(row["tanggal"])
+        return {
+            "saldo": float(pemasukan - pengeluaran),
+            "total_pemasukan": float(pemasukan),
+            "total_pengeluaran": float(pengeluaran),
+            "jumlah_transaksi": jumlah_transaksi,
+        }
+    finally:
+        cursor.close()
+        conn.close()
 
-    return rows 
 
-@app.get("/transaksi/{id}") 
-def get_one(id: int): 
-    db = get_db() 
-    cursor = db.cursor(dictionary=True) 
+@app.get("/transaksi")
+async def get_all_transaksi():
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT * FROM transaksi ORDER BY id DESC")
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+        conn.close()
 
-    cursor.execute( 
-        "SELECT * FROM transaksi WHERE id = %s", 
-        (id,) 
-    ) 
 
-    row = cursor.fetchone()
-    db.close() 
-
-    if not row: 
-        raise HTTPException( 
-            status_code=404, 
-            detail="Transaksi tidak ditemukan" 
-        ) 
-
-    if row.get("tanggal"):
-        row["tanggal"] = str(row["tanggal"])
-
-    return row 
-
-@app.post("/transaksi", status_code=201) 
-def create(data: TransaksiBase): 
-    db = get_db() 
-    cursor = db.cursor() 
-
+@app.post("/transaksi", status_code=status.HTTP_201_CREATED)
+async def create_transaksi(payload: TransaksiSchema):
+    conn = get_db_connection()
+    cursor = conn.cursor()
     try:
         cursor.execute(
-            "INSERT INTO transaksi (tanggal, keterangan, jenis, jumlah) VALUES (%s, %s, %s, %s)", 
-            (data.tanggal, data.keterangan, data.jenis, data.jumlah), 
-        ) 
-        db.commit() 
-        new_id = cursor.lastrowid 
-    except Exception as e:
-        db.rollback()
-        db.close()
-        raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
+            "INSERT INTO transaksi (jenis, tanggal, keterangan, jumlah) VALUES (%s, %s, %s, %s)",
+            (payload.jenis, payload.tanggal, payload.keterangan, payload.jumlah)
+        )
+        conn.commit()
+        return {"status": "success", "inserted_id": cursor.lastrowid}
+    finally:
+        cursor.close()
+        conn.close()
 
-    db.close() 
 
-    return { 
-        "id": new_id, 
-        "message": "Transaksi berhasil ditambahkan" 
-    } 
+@app.put("/transaksi/{transaksi_id}")
+async def update_transaksi(transaksi_id: int, payload: TransaksiSchema):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "UPDATE transaksi SET jenis=%s, tanggal=%s, keterangan=%s, jumlah=%s WHERE id=%s",
+            (payload.jenis, payload.tanggal, payload.keterangan, payload.jumlah, transaksi_id)
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Transaksi tidak ditemukan")
+        return {"status": "success", "updated_id": transaksi_id}
+    finally:
+        cursor.close()
+        conn.close()
 
-@app.put("/transaksi/{id}") 
-def update(id: int, data: TransaksiUpdate): 
-    db = get_db() 
-    cursor = db.cursor(dictionary=True) 
 
-    cursor.execute( 
-        "SELECT * FROM transaksi WHERE id = %s", 
-        (id,) 
-    ) 
+@app.delete("/transaksi/{transaksi_id}")
+async def delete_transaksi(transaksi_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM transaksi WHERE id=%s", (transaksi_id,))
+        conn.commit()
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Transaksi tidak ditemukan")
+        return {"status": "success", "deleted_id": transaksi_id}
+    finally:
+        cursor.close()
+        conn.close()
 
-    row = cursor.fetchone() 
 
-    if not row: 
-        db.close() 
-
-        raise HTTPException(
-            status_code=404, 
-            detail="Transaksi tidak ditemukan" 
-        ) 
-
-    # Normalisasi tanggal database ke string sebelum digabung
-    if row.get("tanggal"):
-        row["tanggal"] = str(row["tanggal"])
-
-    updated = { 
-        **row, 
-        **{ 
-            k: v for k, v in data.dict().items() 
-            if v is not None 
-        } 
-    } 
-
-    cursor.execute( 
-        """ 
-        UPDATE transaksi 
-        SET tanggal=%s, 
-            keterangan=%s, 
-            jenis=%s, 
-            jumlah=%s 
-        WHERE id=%s 
-        """, 
-        ( 
-            updated["tanggal"], 
-            updated["keterangan"], 
-            updated["jenis"], 
-            updated["jumlah"], 
-            id 
-        ), 
-    ) 
-
-    db.commit() 
-    db.close() 
-
-    return { 
-        "message": "Transaksi berhasil diperbarui" 
-    } 
-
-@app.delete("/transaksi/{id}") 
-def delete(id: int): 
-    db = get_db() 
-    cursor = db.cursor() 
-
-    cursor.execute( 
-        "DELETE FROM transaksi WHERE id = %s", 
-        (id,) 
-    ) 
-    db.commit() 
-
-    affected = cursor.rowcount 
-
-    db.close() 
-
-    if affected == 0: 
-        raise HTTPException( 
-            status_code=404, 
-            detail="Transaksi tidak ditemukan" 
-        ) 
-
-    return { 
-        "message": "Transaksi berhasil dihapus"
-    }
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

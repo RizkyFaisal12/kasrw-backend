@@ -1,0 +1,36 @@
+services:
+
+  db:
+    image: mysql:8.0
+    container_name: kasrw-mysql-container
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: rahasia123
+      MYSQL_DATABASE: kasrw
+      MYSQL_USER: kasrw_user
+      MYSQL_PASSWORD: rahasia123
+    ports:
+      - "3306:3306"
+    volumes:
+      - kasrw_mysql_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prahasia123"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: .
+    container_name: kasrw-backend-container
+    restart: always
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  kasrw_mysql_data:
