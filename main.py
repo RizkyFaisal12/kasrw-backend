@@ -2,7 +2,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware 
 from pydantic import BaseModel 
 from typing import Optional 
-from datetime import date 
 import mysql.connector 
 import os 
 from dotenv import load_dotenv 
@@ -23,18 +22,19 @@ def get_db():
         host="192.168.56.11",               
         port=3306, 
         database="kasrw",       
-        user="kasrw",                     
+        user="kasrw",                      
         password="@password123",                 
     ) 
 
+# Mengubah tipe tanggal menjadi str agar aman saat menerima kiriman dari HTML/JS
 class TransaksiBase(BaseModel): 
-    tanggal: date 
+    tanggal: str 
     keterangan: str 
     jenis: str      # 'pemasukan' atau 'pengeluaran' 
     jumlah: float 
 
 class TransaksiUpdate(BaseModel): 
-    tanggal: Optional[date] = None 
+    tanggal: Optional[str] = None 
     keterangan: Optional[str] = None 
     jenis: Optional[str] = None 
     jumlah: Optional[float] = None 
@@ -54,6 +54,11 @@ def get_all():
 
     rows = cursor.fetchall() 
     db.close() 
+
+    # Mengubah objek date MySQL menjadi string biasa agar tidak error JSON
+    for row in rows:
+        if row.get("tanggal"):
+            row["tanggal"] = str(row["tanggal"])
 
     return rows 
 
@@ -76,6 +81,9 @@ def get_one(id: int):
             detail="Transaksi tidak ditemukan" 
         ) 
 
+    if row.get("tanggal"):
+        row["tanggal"] = str(row["tanggal"])
+
     return row 
 
 @app.post("/transaksi", status_code=201) 
@@ -83,14 +91,17 @@ def create(data: TransaksiBase):
     db = get_db() 
     cursor = db.cursor() 
 
-    cursor.execute(
-        "INSERT INTO transaksi (tanggal, keterangan, jenis, jumlah) VALUES (%s, %s, %s, %s)", 
-        (data.tanggal, data.keterangan, data.jenis, data.jumlah), 
-    ) 
-
-    db.commit() 
-
-    new_id = cursor.lastrowid 
+    try:
+        cursor.execute(
+            "INSERT INTO transaksi (tanggal, keterangan, jenis, jumlah) VALUES (%s, %s, %s, %s)", 
+            (data.tanggal, data.keterangan, data.jenis, data.jumlah), 
+        ) 
+        db.commit() 
+        new_id = cursor.lastrowid 
+    except Exception as e:
+        db.rollback()
+        db.close()
+        raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
     db.close() 
 
@@ -118,6 +129,10 @@ def update(id: int, data: TransaksiUpdate):
             status_code=404, 
             detail="Transaksi tidak ditemukan" 
         ) 
+
+    # Normalisasi tanggal database ke string sebelum digabung
+    if row.get("tanggal"):
+        row["tanggal"] = str(row["tanggal"])
 
     updated = { 
         **row, 
